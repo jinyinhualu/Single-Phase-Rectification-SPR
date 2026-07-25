@@ -67,6 +67,19 @@ typedef struct {
     SOGI_t sogi;
 } PLL_t;
 
+typedef struct
+{
+    float kp;
+    float ki;
+    float kd;
+
+    float ek;
+    float ek1;
+    float ek2;
+    float location_sum;
+    float out;
+}PID_LocTypeDef;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -84,29 +97,38 @@ typedef struct {
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-uint32_t dma_adc_buffer[2];
+uint32_t dma_adc_buffer[3];
 volatile float U0;
 volatile float I0;
-volatile float Ud;
+volatile float Ud, Ud_AIM;
 
 PLL_t U0_PLL;
 
 SOGI_t I0_SOGI;
+
+PID_LocTypeDef Ud_PID;
+
+float m, n;
+uint16_t count;
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
+void Float_Limit(float* num, float min, float max);
+
 void UART_SendFrame(UART_HandleTypeDef *huart, float ch1,float ch2,float ch3, float ch4,float ch5,float ch6);
 
 void PLL_init(PLL_t *pll);
 void Sogi_init(SOGI_t *sogi);
-
 void PLL_update(PLL_t *pll, float ualpha_input);
 void Sogi_fun(SOGI_t *sogi, float ualpha_input);
 void dq_pll(PLL_t *pll);
 float zl_pid_increase(float error, PID_t *pid);
+
+void PID_Init(PID_LocTypeDef *PID,float kp,float ki,float kd);
+float PID_increment(float setvalue, float actualvalue, float PID_LIMIT_MIN, float PID_LIMIT_MAX, PID_LocTypeDef *PID);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -133,6 +155,9 @@ int main(void)
   /* USER CODE BEGIN Init */
   PLL_init(&U0_PLL);
   Sogi_init(&I0_SOGI);
+
+  PID_Init(&Ud_PID,0.004,0.0015,0);
+  Ud_AIM = 50.0f;
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -160,7 +185,7 @@ int main(void)
   HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_2);
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
 
-  HAL_ADC_Start_DMA(&hadc1,dma_adc_buffer,2);
+  HAL_ADC_Start_DMA(&hadc1,dma_adc_buffer,3);
   __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_TC);
   /* USER CODE END 2 */
 
@@ -227,16 +252,42 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   {
     U0 = (((dma_adc_buffer[0] / 4095.0f) * 3.3f) - 1.5f) * 30.0f;
     I0 = (((dma_adc_buffer[1] / 4095.0f) * 3.3f) - 1.5f) * 3.0f;
-    // Ud = (dma_adc_buffer[2] / 4095.0f) * 3.3f;
+    Ud = (dma_adc_buffer[2] / 4095.0f) * 3.3f * 20.0f;
 
     PLL_update(&U0_PLL, U0);
     Sogi_fun(&I0_SOGI, I0);
+
+    count++;
+    if (count >= 200)
+    {
+      count = 0;
+      m -= PID_increment(Ud_AIM, Ud, -0.05,0.05, &Ud_PID);
+      Float_Limit(&m, 0.55f, 0.9f);
+    }
+
+    n = m;
+    if (n > 0)
+    {
+      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, n * 8400);
+		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0);
+    }
+    else
+    {
+      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0);
+		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, -n * 8400);
+    }
   }
 
   if (htim == &htim3)
   {
     UART_SendFrame(&huart2, U0 / 30.0f, I0 / 3.0f, U0_PLL.wt / PAID, 0, 0, 0);
   }
+}
+
+void Float_Limit(float* num, float min, float max)
+{
+  if (*num > max) *num = max;
+  if (*num < min) *num = min;
 }
 
 void UART_SendFrame(UART_HandleTypeDef *huart, float ch1,float ch2,float ch3, float ch4,float ch5,float ch6)
@@ -321,6 +372,30 @@ float zl_pid_increase(float error, PID_t *pid)
     pid->ek_1 = pid->ek;
     pid->uk += delta_u;
     return pid->uk;
+}
+
+void PID_Init(PID_LocTypeDef *PID,float kp,float ki,float kd)
+{
+    PID->kp = kp;
+    PID->ki = ki;
+    PID->kd = kd;
+    PID->ek = 0;
+    PID->ek1 = 0;
+    PID->ek2 = 0;
+    PID->location_sum = 0;
+    PID->out = 0;
+}
+
+float PID_increment(float setvalue, float actualvalue, float PID_LIMIT_MIN, float PID_LIMIT_MAX, PID_LocTypeDef *PID)
+{
+	PID->ek =setvalue-actualvalue;
+  PID->out=PID->kp*(PID->ek-PID->ek1)+PID->ki*PID->ek+PID->kd*(PID->ek-2*PID->ek1+PID->ek2);
+  PID->ek2 = PID->ek1;
+  PID->ek1 = PID->ek;
+	if(PID->out<PID_LIMIT_MIN)	PID->out=PID_LIMIT_MIN;
+	if(PID->out>PID_LIMIT_MAX)	PID->out=PID_LIMIT_MAX;
+
+	return PID->out;
 }
 /* USER CODE END 4 */
 

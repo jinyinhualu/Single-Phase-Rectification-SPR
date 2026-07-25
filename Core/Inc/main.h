@@ -57,6 +57,12 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define ADC1_Ud_Pin GPIO_PIN_0
+#define ADC1_Ud_GPIO_Port GPIOC
+#define ADC1_U0_Pin GPIO_PIN_5
+#define ADC1_U0_GPIO_Port GPIOA
+#define ADC1_I0_Pin GPIO_PIN_6
+#define ADC1_I0_GPIO_Port GPIOA
 #define SCREEN_DC_Pin GPIO_PIN_11
 #define SCREEN_DC_GPIO_Port GPIOC
 #define SCREEN_RES_Pin GPIO_PIN_0
