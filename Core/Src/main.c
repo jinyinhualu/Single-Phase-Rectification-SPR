@@ -80,6 +80,22 @@ typedef struct
     float out;
 }PID_LocTypeDef;
 
+typedef struct{
+    float kp ;
+    float kr ;
+    float wi ;
+    float reference ;
+    float ts ;
+    float L_vir;
+    float output_of_backward_integrator ;
+    float output_of_feedback ;
+    float output_of_forward_integrator ;
+    float last_input_of_forward_integrator ;
+    float error;
+    float input_of_forward_integrator;
+    float output ;
+}PR_t;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -87,6 +103,7 @@ typedef struct
 #define Fz        50.0f
 #define PAID      3.14157f
 #define T_sample  0.00005f
+#define L_val     0.002f
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -98,15 +115,20 @@ typedef struct
 
 /* USER CODE BEGIN PV */
 uint32_t dma_adc_buffer[3];
-volatile float U0;
-volatile float I0;
-volatile float Ud, Ud_AIM;
+volatile float U0, I0, Ud;
+
+float ud, uq, id, iq, detad, detaq, cd, cq, ca, cb, Ud_AIM;
 
 PLL_t U0_PLL;
 
 SOGI_t I0_SOGI;
+PR_t I0_PR;
 
-PID_LocTypeDef Ud_PID;
+PID_LocTypeDef Ud_PI;
+PID_LocTypeDef Id_PI;
+PID_LocTypeDef Iq_PI;
+
+float SinVal, CosVal;
 
 float m, n;
 uint16_t count;
@@ -117,18 +139,24 @@ uint16_t count;
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 void Float_Limit(float* num, float min, float max);
+void arm_park_f32 (float alpha, float beta, float* id, float* iq, float sinVal, float cosVal);
+void arm_inv_park_f32 (float id, float iq, float* alpha, float* beta, float sinVal, float cosVal);
 
 void UART_SendFrame(UART_HandleTypeDef *huart, float ch1,float ch2,float ch3, float ch4,float ch5,float ch6);
 
 void PLL_init(PLL_t *pll);
 void Sogi_init(SOGI_t *sogi);
-void PLL_update(PLL_t *pll, float ualpha_input);
+void PLL_update(PLL_t *pll, float ualpha_input, float* sinVal, float* cosVal);
 void Sogi_fun(SOGI_t *sogi, float ualpha_input);
 void dq_pll(PLL_t *pll);
 float zl_pid_increase(float error, PID_t *pid);
 
 void PID_Init(PID_LocTypeDef *PID,float kp,float ki,float kd);
 float PID_increment(float setvalue, float actualvalue, float PID_LIMIT_MIN, float PID_LIMIT_MAX, PID_LocTypeDef *PID);
+
+void PR_Init(PR_t *s, float kp_set, float kr_set, float wi_set, float ts);
+void PR_calc(PR_t *s, float reference, float feedback, float wg);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -153,11 +181,15 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-  PLL_init(&U0_PLL);
-  Sogi_init(&I0_SOGI);
+  // PR_Init(&I0_PR, 0.01, 10, 2, T_sample);
 
-  PID_Init(&Ud_PID,0.004,0.0015,0);
-  Ud_AIM = 50.0f;
+  PLL_init(&U0_PLL);
+  // Sogi_init(&I0_SOGI);
+
+  // PID_Init(&Ud_PI,0.004,0.0015,0);
+  // PID_Init(&Id_PI,0.5,0.0001,0);
+  // PID_Init(&Iq_PI,0.5,0.0001,0);
+  // Ud_AIM = 36.0f;
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -180,10 +212,10 @@ int main(void)
 
   HAL_TIM_Base_Start_IT(&htim2);
   HAL_TIM_Base_Start_IT(&htim3);
-  HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_1);
-  HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
-  HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_2);
-  HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
+  // HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_1);
+  // HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
+  // HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_2);
+  // HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
 
   HAL_ADC_Start_DMA(&hadc1,dma_adc_buffer,3);
   __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_TC);
@@ -254,33 +286,51 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     I0 = (((dma_adc_buffer[1] / 4095.0f) * 3.3f) - 1.5f) * 3.0f;
     Ud = (dma_adc_buffer[2] / 4095.0f) * 3.3f * 20.0f;
 
-    PLL_update(&U0_PLL, U0);
-    Sogi_fun(&I0_SOGI, I0);
+    // PLL_update(&U0_PLL, U0, &SinVal, &CosVal);
 
-    count++;
-    if (count >= 200)
-    {
-      count = 0;
-      m -= PID_increment(Ud_AIM, Ud, -0.05,0.05, &Ud_PID);
-      Float_Limit(&m, 0.55f, 0.9f);
-    }
 
-    n = m;
-    if (n > 0)
-    {
-      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, n * 8400);
-		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0);
-    }
-    else
-    {
-      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0);
-		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, -n * 8400);
-    }
+
+    // Sogi_fun(&I0_SOGI, I0);
+
+    // count++;
+    // if (count >= 200)
+    // {
+    //   count = 0;
+    //   m -= PID_increment(Ud_AIM * 1.414f, Ud, -0.05,0.05, &Ud_PI);
+    //   Float_Limit(&m, 0.55f, 0.9f);
+    // }
+
+    // arm_park_f32(U0_PLL.sogi.SOGI_Ualfa, U0_PLL.sogi.SOGI_Ubeta, &ud, &uq, SinVal, CosVal);
+    // arm_park_f32(I0_SOGI.SOGI_Ualfa, I0_SOGI.SOGI_Ubeta, &id, &iq, SinVal, CosVal);
+
+    // detad -= PID_increment(10, id, -0.02, 0.02, &Id_PI);
+    // detaq += PID_increment(0, iq, -0.02, 0.02, &Iq_PI);
+
+    // cd = (ud  -detad + 100 * PAID * L_val * iq) / Ud_AIM;
+    // cq = (uq - detaq - 100 * PAID * L_val * id) / Ud_AIM;
+    // Float_Limit(&cd, -1, 1);
+    // Float_Limit(&cq, -1, 1);
+    
+    // arm_inv_park_f32(cd, cq, &ca, &cb, SinVal, CosVal);
+
+    // n = m * ca;
+    // Float_Limit(&n, -1, 1);
+
+    // if (n > 0)
+    // {
+    //   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, n * 8400);
+		//   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0);
+    // }
+    // else
+    // {
+    //   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0);
+		//   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, -n * 8400);
+    // }
   }
 
   if (htim == &htim3)
   {
-    UART_SendFrame(&huart2, U0 / 30.0f, I0 / 3.0f, U0_PLL.wt / PAID, 0, 0, 0);
+    UART_SendFrame(&huart2, U0, I0 / 3.0f, 0, 0, 0, 0);
   }
 }
 
@@ -288,6 +338,18 @@ void Float_Limit(float* num, float min, float max)
 {
   if (*num > max) *num = max;
   if (*num < min) *num = min;
+}
+
+void arm_park_f32 (float alpha, float beta, float* id, float* iq, float sinVal, float cosVal)
+{
+  *id =  alpha * cosVal + beta * sinVal;
+  *iq = -alpha * sinVal + beta * cosVal;
+}
+
+void arm_inv_park_f32 (float id, float iq, float* alpha, float* beta, float sinVal, float cosVal)
+{
+  *alpha = id * cosVal - iq * sinVal;
+  *beta  = id * sinVal + iq * cosVal;
 }
 
 void UART_SendFrame(UART_HandleTypeDef *huart, float ch1,float ch2,float ch3, float ch4,float ch5,float ch6)
@@ -331,10 +393,12 @@ void Sogi_init(SOGI_t *sogi)
     sogi->samp_t = T_sample;
 }
 
-void PLL_update(PLL_t *pll, float ualpha_input)
+void PLL_update(PLL_t *pll, float ualpha_input, float* sinVal, float* cosVal)
 {
     Sogi_fun(&pll->sogi, ualpha_input);
     dq_pll(pll);
+    *sinVal = sinf(pll->wt);
+    *cosVal = cosf(pll->wt);
 }
 
 void Sogi_fun(SOGI_t *sogi, float ualpha_input)
@@ -352,8 +416,8 @@ void Sogi_fun(SOGI_t *sogi, float ualpha_input)
 
 void dq_pll(PLL_t *pll)
 {
-    float uq1 = cos(pll->wt) * pll->sogi.SOGI_Ubeta
-             - sin(pll->wt) * pll->sogi.SOGI_Ualfa;
+    float uq1 = cosf(pll->wt) * pll->sogi.SOGI_Ubeta
+             - sinf(pll->wt) * pll->sogi.SOGI_Ualfa;
 
 
     float con_increase = zl_pid_increase(0-uq1, &pll->pid);
@@ -396,6 +460,39 @@ float PID_increment(float setvalue, float actualvalue, float PID_LIMIT_MIN, floa
 	if(PID->out>PID_LIMIT_MAX)	PID->out=PID_LIMIT_MAX;
 
 	return PID->out;
+}
+
+void PR_Init(PR_t *s, float kp_set, float kr_set, float wi_set, float ts)
+{
+    s->kp = kp_set ;
+    s->kr = kr_set ;
+    s->wi = wi_set ;
+    s->ts = ts ;
+    s->L_vir=0;
+    s->output_of_feedback = 0;
+    s->output_of_backward_integrator = 0;
+    s->output_of_forward_integrator = 0 ;
+    s->error=0;
+    s->input_of_forward_integrator=0;
+    s->reference = 0 ;
+    s->output= 0 ;
+}
+
+void PR_calc(PR_t *s, float reference, float feedback, float wg)
+{
+    s->reference = reference;
+
+    s->error = reference - feedback ;
+    s->input_of_forward_integrator = 2 * s->wi * s->kr * s->error - s->output_of_feedback;
+    // Forward integrator :
+    s->output_of_forward_integrator += s->ts *  s->input_of_forward_integrator;
+
+    // Backward integrator:
+    s->output_of_backward_integrator += s->ts * s->output_of_forward_integrator * wg * wg ;
+
+    s->output_of_feedback = s->output_of_backward_integrator + 2 * s->wi * s->output_of_forward_integrator ;
+
+    s->output=s->output_of_forward_integrator + s->kp* s->error;
 }
 /* USER CODE END 4 */
 
