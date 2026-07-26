@@ -96,6 +96,14 @@ typedef struct{
     float output ;
 }PR_t;
 
+typedef struct {
+	  float output;
+    float u_prev1, u_prev2;
+    float y_prev1, y_prev2;
+    float b0, b1, b2, a1, a2;
+    float kp,kr,T,omega_c,omega_0;
+    float out_limit;
+} PR;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -117,7 +125,7 @@ typedef struct{
 uint32_t dma_adc_buffer[3];
 volatile float U0, I0, Ud;
 
-float ud, uq, id, iq, detad, detaq, cd, cq, ca, cb, Ud_AIM;
+float ud, uq, id, iq, detad, detaq, cd, cq, ca, cb, I0_AIM, I0_REF, Ud_AIM;
 
 PLL_t U0_PLL;
 
@@ -155,7 +163,9 @@ void PID_Init(PID_LocTypeDef *PID,float kp,float ki,float kd);
 float PID_increment(float setvalue, float actualvalue, float PID_LIMIT_MIN, float PID_LIMIT_MAX, PID_LocTypeDef *PID);
 
 void PR_Init(PR_t *s, float kp_set, float kr_set, float wi_set, float ts);
+void PR_init(PR* ctrl, float T, float Kp, float Kr, float omega_c, float omega_0, float out_limit);
 void PR_calc(PR_t *s, float reference, float feedback, float wg);
+void PR_Update(PR_t *s, float reference, float feedback, float omega0);
 
 /* USER CODE END PFP */
 
@@ -181,9 +191,7 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-  // PR_Init(&I0_PR, 0.01, 10, 2, T_sample);
-
-  PLL_init(&U0_PLL);
+  // PLL_init(&U0_PLL);
   // Sogi_init(&I0_SOGI);
 
   // PID_Init(&Ud_PI,0.004,0.0015,0);
@@ -212,10 +220,10 @@ int main(void)
 
   HAL_TIM_Base_Start_IT(&htim2);
   HAL_TIM_Base_Start_IT(&htim3);
-  // HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_1);
-  // HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
-  // HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_2);
-  // HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_1);
+  HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_2);
+  HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
 
   HAL_ADC_Start_DMA(&hadc1,dma_adc_buffer,3);
   __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_TC);
@@ -282,21 +290,18 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim == &htim2)
   {
-    U0 = (((dma_adc_buffer[0] / 4095.0f) * 3.3f) - 1.5f) * 30.0f;
-    I0 = (((dma_adc_buffer[1] / 4095.0f) * 3.3f) - 1.5f) * 3.0f;
-    Ud = (dma_adc_buffer[2] / 4095.0f) * 3.3f * 20.0f;
+    U0 = -((float)(dma_adc_buffer[0] / 4096.0f) * 3.3f - 1.62f) * 33.4f;
+    I0 = ((float)(dma_adc_buffer[1] / 4096.0f) * 3.3f - 1.518f) * 3.404f;
+    Ud = (dma_adc_buffer[2] / 4095.0f) * 3.3f * 15.0f;
 
-    // PLL_update(&U0_PLL, U0, &SinVal, &CosVal);
-
-
-
+    PLL_update(&U0_PLL, U0, &SinVal, &CosVal);
     // Sogi_fun(&I0_SOGI, I0);
 
     // count++;
     // if (count >= 200)
     // {
     //   count = 0;
-    //   m -= PID_increment(Ud_AIM * 1.414f, Ud, -0.05,0.05, &Ud_PI);
+    //   m -= PID_increment(Ud_AIM, Ud, -0.05,0.05, &Ud_PI);
     //   Float_Limit(&m, 0.55f, 0.9f);
     // }
 
@@ -314,23 +319,23 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     // arm_inv_park_f32(cd, cq, &ca, &cb, SinVal, CosVal);
 
     // n = m * ca;
-    // Float_Limit(&n, -1, 1);
+    Float_Limit(&n, -1, 1);
 
-    // if (n > 0)
-    // {
-    //   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, n * 8400);
-		//   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0);
-    // }
-    // else
-    // {
-    //   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0);
-		//   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, -n * 8400);
-    // }
+    if (n > 0)
+    {
+      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, n * 8400);
+		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0);
+    }
+    else
+    {
+      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0);
+		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, -n * 8400);
+    }
   }
 
   if (htim == &htim3)
   {
-    UART_SendFrame(&huart2, U0, I0 / 3.0f, 0, 0, 0, 0);
+    UART_SendFrame(&huart2, U0 / 33.4f, I0 / 3.404f, U0_PLL.wt, cd, cq, n);
   }
 }
 
@@ -472,6 +477,7 @@ void PR_Init(PR_t *s, float kp_set, float kr_set, float wi_set, float ts)
     s->output_of_feedback = 0;
     s->output_of_backward_integrator = 0;
     s->output_of_forward_integrator = 0 ;
+    s->last_input_of_forward_integrator = 0;
     s->error=0;
     s->input_of_forward_integrator=0;
     s->reference = 0 ;
@@ -493,6 +499,51 @@ void PR_calc(PR_t *s, float reference, float feedback, float wg)
     s->output_of_feedback = s->output_of_backward_integrator + 2 * s->wi * s->output_of_forward_integrator ;
 
     s->output=s->output_of_forward_integrator + s->kp* s->error;
+}
+
+void PR_init(PR* ctrl, float T, float Kp, float Kr, float omega_c, float omega_0, float out_limit)
+{
+    float a0 = (4.0f / (T * T)) + (4.0f * omega_c / T) + omega_0 * omega_0;
+    float a1 = (-8.0f / (T * T)) + 2.0f * omega_0 * omega_0;
+    float a2 = (4.0f / (T * T)) - (4.0f * omega_c / T) + omega_0 * omega_0;
+
+    float b0 = (4.0f * Kp) / (T * T) + (4.0f * omega_c * (Kp + Kr) / T) + Kp * omega_0 * omega_0;
+    float b1 = (-8.0f * Kp) / (T * T) + 2.0f * Kp * omega_0 * omega_0;
+    float b2 = (4.0f * Kp) / (T * T) - (4.0f * omega_c * (Kp + Kr) / T) + Kp * omega_0 * omega_0;
+
+    ctrl->T=T;
+    ctrl->kp=Kp;
+    ctrl->kr=Kr;
+    ctrl->omega_0=omega_0;
+    ctrl->omega_c=omega_c;
+
+    ctrl->b0 = b0 / a0;
+    ctrl->b1 = b1 / a0;
+    ctrl->b2 = b2 / a0;
+    ctrl->a1 = a1 / a0;
+    ctrl->a2 = a2 / a0;
+
+    ctrl->u_prev1 = 0.0f;
+    ctrl->u_prev2 = 0.0f;
+    ctrl->y_prev1 = 0.0f;
+    ctrl->y_prev2 = 0.0f;
+
+    ctrl->output=0;
+    ctrl->out_limit=out_limit;
+}
+
+void PR_Update(PR_t *s, float reference, float feedback, float omega0)
+{
+    s->reference = reference;
+
+    s->error = reference - feedback;
+    s->input_of_forward_integrator = 2.0f * s->wi * s->kr * s->error - s->output_of_feedback;
+
+    s->output_of_forward_integrator += s->ts * s->input_of_forward_integrator;
+    s->output_of_backward_integrator += s->ts * omega0 * omega0 * s->output_of_forward_integrator;
+    s->output_of_feedback = s->output_of_backward_integrator + 2.0f * s->wi * s->output_of_forward_integrator;
+
+    s->output = s->output_of_forward_integrator + s->kp * s->error;
 }
 /* USER CODE END 4 */
 
