@@ -130,7 +130,7 @@ float ud, uq, id, iq, detad, detaq, cd, cq, ca, cb, I0_AIM, I0_REF, Ud_AIM;
 PLL_t U0_PLL;
 
 SOGI_t I0_SOGI;
-PR_t I0_PR;
+PR I0_PR;
 
 PID_LocTypeDef Ud_PI;
 PID_LocTypeDef Id_PI;
@@ -140,6 +140,7 @@ float SinVal, CosVal;
 
 float m, n;
 uint16_t count;
+uint32_t Keynum;
 
 /* USER CODE END PV */
 
@@ -147,6 +148,7 @@ uint16_t count;
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 void Float_Limit(float* num, float min, float max);
+float LowPassFilter(float input);
 void arm_park_f32 (float alpha, float beta, float* id, float* iq, float sinVal, float cosVal);
 void arm_inv_park_f32 (float id, float iq, float* alpha, float* beta, float sinVal, float cosVal);
 
@@ -165,7 +167,11 @@ float PID_increment(float setvalue, float actualvalue, float PID_LIMIT_MIN, floa
 void PR_Init(PR_t *s, float kp_set, float kr_set, float wi_set, float ts);
 void PR_init(PR* ctrl, float T, float Kp, float Kr, float omega_c, float omega_0, float out_limit);
 void PR_calc(PR_t *s, float reference, float feedback, float wg);
-void PR_Update(PR_t *s, float reference, float feedback, float omega0);
+void PR_StateUpdate(PR_t *s, float reference, float feedback, float omega0);
+void PR_Update(PR* ctrl, float input, float gain);
+
+void get_num(void);
+uint8_t get_keyboard_value(void);
 
 /* USER CODE END PFP */
 
@@ -191,13 +197,16 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-  // PLL_init(&U0_PLL);
-  // Sogi_init(&I0_SOGI);
-
+  PLL_init(&U0_PLL);
   // PID_Init(&Ud_PI,0.004,0.0015,0);
+
+  Sogi_init(&I0_SOGI);
+
   // PID_Init(&Id_PI,0.5,0.0001,0);
   // PID_Init(&Iq_PI,0.5,0.0001,0);
-  // Ud_AIM = 36.0f;
+
+  I0_AIM = 1.0f;
+  PR_init(&I0_PR, T_sample, 15.0f, 20.0f, 2.5f, 2.0f * PAID * Fz, 60.0f);
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -218,15 +227,18 @@ int main(void)
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
 
-  HAL_TIM_Base_Start_IT(&htim2);
-  HAL_TIM_Base_Start_IT(&htim3);
+  HAL_ADC_Start_DMA(&hadc1,dma_adc_buffer,3);
+  __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_TC);
+
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0);
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0);
   HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_1);
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_2);
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
 
-  HAL_ADC_Start_DMA(&hadc1,dma_adc_buffer,3);
-  __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_TC);
+  HAL_TIM_Base_Start_IT(&htim2);
+  HAL_TIM_Base_Start_IT(&htim3);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -290,11 +302,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim == &htim2)
   {
-    U0 = -((float)(dma_adc_buffer[0] / 4096.0f) * 3.3f - 1.62f) * 33.4f;
-    I0 = ((float)(dma_adc_buffer[1] / 4096.0f) * 3.3f - 1.518f) * 3.404f;
-    Ud = (dma_adc_buffer[2] / 4095.0f) * 3.3f * 15.0f;
-
-    PLL_update(&U0_PLL, U0, &SinVal, &CosVal);
     // Sogi_fun(&I0_SOGI, I0);
 
     // count++;
@@ -319,7 +326,23 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     // arm_inv_park_f32(cd, cq, &ca, &cb, SinVal, CosVal);
 
     // n = m * ca;
-    Float_Limit(&n, -1, 1);
+
+    U0 = -((float)(dma_adc_buffer[0] / 4095.0f) * 3.3f - 1.53033f)  * 35.513475f;
+    I0 =  ((float)(dma_adc_buffer[1] / 4096.0f) * 3.3f - 1.51800f)  * 3.491f;
+    Ud =  ((float)(dma_adc_buffer[2] / 4096.0f) * 3.3f * 14.13784f) + 0.60556f;
+
+    PLL_update(&U0_PLL, U0, &SinVal, &CosVal);
+    Sogi_fun(&I0_SOGI, I0);
+
+    U0 = U0_PLL.sogi.SOGI_Ualfa;
+    I0 = I0_SOGI.SOGI_Ualfa;
+    Ud = LowPassFilter(Ud);
+
+    I0_REF = 1.414f * I0_AIM * CosVal;
+    PR_Update(&I0_PR, I0_REF - I0, 1.0f);
+
+    n = (U0 - I0_PR.output) / 50.0f;
+    Float_Limit(&n, -1.0f, 1.0f);
 
     if (n > 0)
     {
@@ -335,7 +358,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
   if (htim == &htim3)
   {
-    UART_SendFrame(&huart2, U0 / 33.4f, I0 / 3.404f, U0_PLL.wt, cd, cq, n);
+    UART_SendFrame(&huart2, U0 / 35.513475f, I0 / 3.491f, U0_PLL.wt, Ud, I0_REF, n);
   }
 }
 
@@ -343,6 +366,14 @@ void Float_Limit(float* num, float min, float max)
 {
   if (*num > max) *num = max;
   if (*num < min) *num = min;
+}
+
+float LowPassFilter(float input)
+{
+  static float output;
+
+  output += 0.02f * (input - output);
+  return output;
 }
 
 void arm_park_f32 (float alpha, float beta, float* id, float* iq, float sinVal, float cosVal)
@@ -532,7 +563,7 @@ void PR_init(PR* ctrl, float T, float Kp, float Kr, float omega_c, float omega_0
     ctrl->out_limit=out_limit;
 }
 
-void PR_Update(PR_t *s, float reference, float feedback, float omega0)
+void PR_StateUpdate(PR_t *s, float reference, float feedback, float omega0)
 {
     s->reference = reference;
 
@@ -544,6 +575,92 @@ void PR_Update(PR_t *s, float reference, float feedback, float omega0)
     s->output_of_feedback = s->output_of_backward_integrator + 2.0f * s->wi * s->output_of_forward_integrator;
 
     s->output = s->output_of_forward_integrator + s->kp * s->error;
+}
+
+void PR_Update(PR* ctrl, float input, float gain)
+{
+    ctrl->output =
+        ctrl->b0 * input +
+        ctrl->b1 * ctrl->u_prev1 +
+        ctrl->b2 * ctrl->u_prev2 -
+        ctrl->a1 * ctrl->y_prev1 -
+        ctrl->a2 * ctrl->y_prev2;
+
+    ctrl->u_prev2 = ctrl->u_prev1;
+    ctrl->u_prev1 = input;
+    ctrl->y_prev2 = ctrl->y_prev1;
+    ctrl->y_prev1 = ctrl->output;
+
+    ctrl->output *= gain;
+    ctrl->output = ctrl->output > ctrl->out_limit ? ctrl->out_limit :
+        (ctrl->output < -ctrl->out_limit ? -ctrl->out_limit : ctrl->output);
+}
+
+void get_num(void)
+{
+
+	if(get_keyboard_value()!=0)
+	{
+		HAL_Delay(30);
+		if(get_keyboard_value()!=0)
+		{
+			switch(get_keyboard_value())
+			{
+			case '1':Keynum=1;break;
+			case '2':Keynum=2;break;
+			case '3':Keynum=3;break;
+			case '4':Keynum=4;break;
+			case '5':Keynum=5;break;
+			case '6':Keynum=6;break;
+			case '7':Keynum=7;break;
+			case '8':Keynum=8;break;
+			case '9':Keynum=9;break;
+			case '0':Keynum=0;break;
+			case 'A':break;//a
+			case 'B':break;//b
+			case 'C':break;//c
+			case 'D':break;//d
+			case '#':break;//#
+			case '*':break;//#
+			default:break;
+			}
+
+		}
+	}
+}
+
+uint8_t get_keyboard_value(void)
+{
+    int h_arr[4] = {KEY_H1_Pin, KEY_H2_Pin, KEY_H3_Pin, KEY_H4_Pin};
+    int v_arr[4] = {KEY_V1_Pin, KEY_V2_Pin, KEY_V3_Pin, KEY_V4_Pin};
+    uint8_t board[16]={'1','4','7','*','2','5','8','0','3','6','9','#','A','B','C','D'};
+
+
+    int i = 0;
+		int j = 0;
+    int key_value = 0;
+    for (i = 0; i < 4; i++)
+    {
+    	HAL_GPIO_WritePin((i>0) ? GPIOE:GPIOD,v_arr[i],0);
+    	HAL_GPIO_WritePin(((i+1)%4>0) ? GPIOE:GPIOD,v_arr[(i + 1) % 4],1);
+    	HAL_GPIO_WritePin(((i+2)%4>0) ? GPIOE:GPIOD,v_arr[(i + 2) % 4],1);
+    	HAL_GPIO_WritePin(((i+3)%4>0) ? GPIOE:GPIOD,v_arr[(i + 3) % 4],1);
+
+        HAL_Delay(1);
+
+        for (j = 0; j < 4; j++)
+        {
+            if (HAL_GPIO_ReadPin(GPIOD, h_arr[j]) == 0)
+            {
+                key_value = j * 4 + i + 1;
+            }
+        }
+
+    }
+    if(key_value==0)
+    	return 0;
+    else
+    	return board[key_value-1];
 }
 /* USER CODE END 4 */
 
